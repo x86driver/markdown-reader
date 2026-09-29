@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "markdown-finder"
+dynamic = ["version"]
+description = "A local Qt Markdown reader with quick-open search and tabs"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6-Essentials>=6.8,<7",
+    "PySide6-Addons>=6.8,<7",
+    "RapidFuzz>=3.10,<4",
+    "markdown-it-py>=3,<5",
+    "mdit-py-plugins>=0.4,<1",
+    "Pygments>=2.18,<3",
+]
+
+[project.scripts]
+markdown-finder = "markdown_finder.app:main"
+
+[tool.hatch.version]
+path = "src/markdown_finder/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/markdown_finder"]
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/markdown_finder/_version.py" }]

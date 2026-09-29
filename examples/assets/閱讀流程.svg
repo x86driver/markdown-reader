@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="230" viewBox="0 0 960 230" role="img" aria-labelledby="title desc">
+  <title id="title">Markdown 閱讀操作流程</title>
+  <desc id="desc">按 Ctrl+P，搜尋檔名或路徑，按 Enter，在分頁閱讀文件。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect width="960" height="230" rx="20" fill="#f1f5f9"/>
+  <g font-family="Noto Sans CJK TC, Noto Sans, sans-serif" text-anchor="middle">
+    <text x="480" y="42" font-size="20" font-weight="700" fill="#172b4d">從找檔到閱讀</text>
+    <rect x="35" y="77" width="245" height="105" rx="14" fill="#e0eaff" stroke="#99b6e8"/>
+    <text x="157.5" y="117" font-size="21" font-weight="700" fill="#214fb0">Ctrl+P</text>
+    <text x="157.5" y="153" font-size="17" fill="#243550">搜尋檔名與路徑</text>
+    <rect x="357" y="77" width="245" height="105" rx="14" fill="#e0eaff" stroke="#99b6e8"/>
+    <text x="479.5" y="117" font-size="21" font-weight="700" fill="#214fb0">Enter</text>
+    <text x="479.5" y="153" font-size="17" fill="#243550">開啟或切換分頁</text>
+    <rect x="679" y="77" width="245" height="105" rx="14" fill="#dcf2e7" stroke="#9bcab1"/>
+    <text x="801.5" y="117" font-size="21" font-weight="700" fill="#256647">閱讀文件</text>
+    <text x="801.5" y="153" font-size="17" fill="#243550">目錄、搜尋、縮放</text>
+  </g>
+  <path d="M 295 129 L 337 129" fill="none" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M 617 129 L 659 129" fill="none" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+</svg>
