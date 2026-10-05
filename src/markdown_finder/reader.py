@@ -13,11 +13,36 @@ from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton, QSplitter,
+    QAbstractItemView, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton, QSplitter,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .rendering import RenderedDocument, render_document
+
+
+_OUTLINE_ANCHOR_SCRIPT = """
+(() => {
+    // Cache elements, not positions: layout can change with zoom or images.
+    const headings = window.__markdownFinderOutlineHeadings ||= Array.from(
+        document.querySelectorAll('h1[id], h2[id], h3[id], h4[id], h5[id], h6[id]')
+    );
+    if (!headings.length) return '';
+    const root = document.documentElement;
+    // A short final section may never reach the top of the viewport.
+    if (window.scrollY > 0 && Math.ceil(window.scrollY + window.innerHeight) >= root.scrollHeight)
+        return headings[headings.length - 1].id;
+    // Match the reading inset used by scrollIntoView for chapter links.
+    const inset = (parseFloat(getComputedStyle(root).scrollPaddingTop) || 0)
+        + (parseFloat(getComputedStyle(headings[0]).scrollMarginTop) || 0) + 1;
+    let low = 0, high = headings.length;
+    while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (headings[middle].getBoundingClientRect().top <= inset) low = middle + 1;
+        else high = middle;
+    }
+    return headings[Math.max(0, low - 1)].id;
+})()
+"""
 
 
 class RenderThread(QThread):
@@ -92,6 +117,9 @@ class DocumentTab(QWidget):
         self._applied_session_scroll: tuple[float, float] | None = None
         self._session_restore_token = 0
         self._outline_width = 230
+        self._outline_items: dict[str, QTreeWidgetItem] = {}
+        self._outline_sync_pending = False
+        self._outline_sync_requested = False
         self._scroll_input_widget = None
         self._document_url = QUrl()
         self._temporary = tempfile.TemporaryDirectory(prefix="markdown-finder-")
@@ -196,6 +224,10 @@ class DocumentTab(QWidget):
         self.restore_timer.setSingleShot(True)
         self.restore_timer.setInterval(80)
         self.restore_timer.timeout.connect(self._restore_scroll)
+        self.outline_sync_timer = QTimer(self)
+        self.outline_sync_timer.setSingleShot(True)
+        self.outline_sync_timer.setInterval(50)
+        self.outline_sync_timer.timeout.connect(self._sync_outline)
         self.view.installEventFilter(self)
         self.page = ReaderPage(self, self.view)
         self.view.setPage(self.page)
@@ -215,6 +247,8 @@ class DocumentTab(QWidget):
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
         self.view.loadFinished.connect(self._load_finished)
         self.page.findTextFinished.connect(self._find_finished)
+        self.page.scrollPositionChanged.connect(self._schedule_outline_sync)
+        self.page.contentsSizeChanged.connect(self._schedule_outline_sync)
         self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self._context_menu)
         self.splitter.addWidget(self.view)
@@ -240,6 +274,8 @@ class DocumentTab(QWidget):
         self.outline.setVisible(visible)
         if visible:
             self._apply_outline_width()
+            self._reveal_outline_item(self.outline.currentItem())
+            self._schedule_outline_sync()
 
     def _remember_outline_width(self, *args):
         if not self.outline.isHidden() and self.splitter.sizes()[0] > 0:
@@ -373,7 +409,52 @@ class DocumentTab(QWidget):
     def _outline_clicked(self, item, column=0):
         self.scroll_to_anchor(item.data(0, Qt.ItemDataRole.UserRole))
 
+    def _schedule_outline_sync(self, *args):
+        if (self._closing or not self.loaded or not self._outline_items
+                or not self.isVisible() or self.outline.isHidden()):
+            return
+        self._outline_sync_requested = True
+        # Throttle instead of restarting the timer on every scroll event, so
+        # the outline also follows a continuous wheel/trackpad scroll.
+        if not self._outline_sync_pending and not self.outline_sync_timer.isActive():
+            self.outline_sync_timer.start()
+
+    def _sync_outline(self):
+        if (self._closing or not self.loaded or not self._outline_items
+                or not self.isVisible() or self.outline.isHidden()):
+            return
+        self._outline_sync_requested = False
+        self._outline_sync_pending = True
+        generation = self._generation
+
+        def located(anchor):
+            if self._closing:
+                return
+            self._outline_sync_pending = False
+            if (generation == self._generation and self.loaded
+                    and self.isVisible() and not self.outline.isHidden()):
+                item = self._outline_items.get(anchor) if isinstance(anchor, str) else None
+                if item is not None and item is not self.outline.currentItem():
+                    # Only click/activation navigate the reader. Changing the
+                    # current item here must never move the document itself.
+                    self.outline.setCurrentItem(item)
+                    self._reveal_outline_item(item)
+            if self._outline_sync_requested:
+                self._schedule_outline_sync()
+
+        self.page.runJavaScript(_OUTLINE_ANCHOR_SCRIPT, located)
+
+    def _reveal_outline_item(self, item):
+        if item is None:
+            return
+        ancestor = item.parent()
+        while ancestor is not None:
+            ancestor.setExpanded(True)
+            ancestor = ancestor.parent()
+        self.outline.scrollToItem(item, QAbstractItemView.ScrollHint.EnsureVisible)
+
     def _populate_outline(self, document):
+        self._outline_items.clear()
         self.outline.clear()
         ancestors: list[tuple[int, QTreeWidgetItem]] = []
         for heading in document.headings:
@@ -382,6 +463,7 @@ class DocumentTab(QWidget):
             item = QTreeWidgetItem([heading.title])
             item.setToolTip(0, heading.title)
             item.setData(0, Qt.ItemDataRole.UserRole, heading.anchor)
+            self._outline_items[heading.anchor] = item
             if ancestors:
                 ancestors[-1][1].addChild(item)
             else:
@@ -399,6 +481,7 @@ class DocumentTab(QWidget):
             return
         self._active_load = True
         self.loaded = False
+        self.outline_sync_timer.stop()
         self._reload_pending = False
         self._applied_session_scroll = None
         self._scroll = self._css_scroll_position()
@@ -464,6 +547,7 @@ class DocumentTab(QWidget):
                 self._schedule_restore()
             else:
                 self.page.runJavaScript(f"window.scrollTo({self._scroll[0]}, {self._scroll[1]});")
+            self._schedule_outline_sync()
             if not self.find_bar.isHidden() and self.find_input.text():
                 self._find()
             # Old generated pages are no longer needed after the new DOM loads.
@@ -585,6 +669,7 @@ class DocumentTab(QWidget):
                 self.fit_width_timer.start()
             self._install_scroll_input_filter()
             self._schedule_restore()
+            self._schedule_outline_sync()
         if watched in (self.view, self._scroll_input_widget):
             if event.type() in (QEvent.Type.Wheel, QEvent.Type.MouseButtonPress, QEvent.Type.TouchBegin):
                 self._cancel_session_restore()
@@ -647,6 +732,7 @@ class DocumentTab(QWidget):
         factor = max(0.25, min(5.0, factor))
         self.view.setZoomFactor(factor)
         self.zoom_button.setText(f"{self.view.zoomFactor():.0%}")
+        self._schedule_outline_sync()
 
     def begin_close(self):
         if self._closing:
@@ -656,6 +742,7 @@ class DocumentTab(QWidget):
         self.watch_timer.stop()
         self.fit_width_timer.stop()
         self.restore_timer.stop()
+        self.outline_sync_timer.stop()
         paths = self.watcher.files() + self.watcher.directories()
         if paths:
             self.watcher.removePaths(paths)

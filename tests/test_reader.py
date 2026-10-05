@@ -138,6 +138,138 @@ class ReaderTests(unittest.TestCase):
         self.assertTrue(self.tab.close_find())
         self.assertFalse(self.tab.close_find())
 
+    def test_outline_follows_scrolling_down_and_up_without_moving_reader(self):
+        self.replace("# Chapters\n\n" + "".join(
+            f"## Section {index}\n\n" + "Paragraph content.\n\n" * 12
+            for index in range(60)
+        ))
+        root = self.tab.outline.topLevelItem(0)
+        for index in (48, 3):
+            item = root.child(index)
+            target = self.javascript(
+                f"window.scrollTo(0, document.querySelectorAll('h2')[{index}]"
+                ".getBoundingClientRect().top + window.scrollY); window.scrollY"
+            )
+            wait_until(lambda: self.tab.outline.currentItem() is item)
+            wait_until(lambda: self.tab.outline.viewport().rect().contains(
+                self.tab.outline.visualItemRect(item).center()
+            ))
+            QTest.qWait(150)
+            self.assertAlmostEqual(self.javascript("window.scrollY"), target, delta=1)
+        clicked = root.child(6)
+        wait_until(lambda: self.tab.outline.viewport().rect().contains(
+            self.tab.outline.visualItemRect(clicked).center()
+        ))
+        before_click = self.javascript("window.scrollY")
+        QTest.mouseClick(
+            self.tab.outline.viewport(), Qt.MouseButton.LeftButton,
+            pos=self.tab.outline.visualItemRect(clicked).center(),
+        )
+        wait_until(lambda: self.tab.page.scrollPosition().y() > before_click + 100)
+        wait_until(lambda: 0 <= self.javascript(
+            "document.querySelectorAll('h2')[6].getBoundingClientRect().top"
+        ) <= 49)
+        QTest.qWait(150)
+        self.assertIs(self.tab.outline.currentItem(), clicked)
+        self.assertEqual(self.errors, [])
+
+    def test_outline_reveals_collapsed_ancestors_of_current_section(self):
+        self.replace(
+            "# Root\n\n## First\n\n" + "Paragraph.\n\n" * 35
+            + "## Parent\n\n" + "Paragraph.\n\n" * 35
+            + "### Child\n\n" + "Paragraph.\n\n" * 35
+            + "## End\n\n" + "Paragraph.\n\n" * 35
+        )
+        root = self.tab.outline.topLevelItem(0)
+        parent = root.child(1)
+        child = parent.child(0)
+        root.setExpanded(False)
+        parent.setExpanded(False)
+        self.javascript(
+            "window.scrollTo(0, document.querySelector('h3').getBoundingClientRect().top"
+            " + window.scrollY); true"
+        )
+        wait_until(lambda: self.tab.outline.currentItem() is child)
+        self.assertTrue(root.isExpanded())
+        self.assertTrue(parent.isExpanded())
+        wait_until(lambda: self.tab.outline.viewport().rect().contains(
+            self.tab.outline.visualItemRect(child).center()
+        ))
+
+    def test_outline_matches_section_after_zoom_reload_and_session_restore(self):
+        self.replace("# Chapters\n\n" + "".join(
+            f"## Section {index}\n\n" + "Paragraph content.\n\n" * 25
+            for index in range(14)
+        ))
+        for _ in range(5):
+            self.tab.zoom_in()
+        QTest.qWait(100)
+        target = self.javascript(
+            "window.scrollTo(0, document.querySelectorAll('h2')[8].getBoundingClientRect().top"
+            " + window.scrollY + 80); window.scrollY"
+        )
+        wait_until(lambda: self.tab.outline.currentItem() is self.tab.outline.topLevelItem(0).child(8))
+        state = self.tab.session_state()
+        self.assertAlmostEqual(state["scroll_y"], target, delta=1)
+        count = len(self.ready)
+        self.tab.reload_document()
+        wait_until(lambda: len(self.ready) > count)
+        wait_until(lambda: self.tab.outline.currentItem() is self.tab.outline.topLevelItem(0).child(8))
+        self.assertAlmostEqual(self.javascript("window.scrollY"), target, delta=1)
+        self.reopen(state)
+        wait_until(lambda: self.tab.outline.currentItem() is self.tab.outline.topLevelItem(0).child(8))
+        self.assertAlmostEqual(self.tab.view.zoomFactor(), 1.5)
+        self.assertAlmostEqual(self.javascript("window.scrollY"), target, delta=1)
+
+    def test_reopened_outline_shows_section_reached_while_hidden(self):
+        self.replace("# Chapters\n\n" + "".join(
+            f"## Section {index}\n\n" + "Paragraph.\n\n" * 15
+            for index in range(50)
+        ))
+        self.tab.outline_button.click()
+        self.assertTrue(self.tab.outline.isHidden())
+        self.javascript(
+            "window.scrollTo(0, document.querySelectorAll('h2')[40].getBoundingClientRect().top"
+            " + window.scrollY + 80); true"
+        )
+        wait_until(lambda: self.tab.page.scrollPosition().y() > 1000)
+        self.tab.outline_button.click()
+        item = self.tab.outline.topLevelItem(0).child(40)
+        wait_until(lambda: self.tab.outline.currentItem() is item)
+        wait_until(lambda: self.tab.outline.viewport().rect().contains(
+            self.tab.outline.visualItemRect(item).center()
+        ))
+
+    def test_outline_distinguishes_repeated_headings_and_short_final_section(self):
+        self.replace("# Chapters\n\n" + (
+            "## Repeated\n\n" + "Paragraph.\n\n" * 35
+        ) * 6 + "## Final\n\nEnd.\n")
+        root = self.tab.outline.topLevelItem(0)
+        repeated = root.child(4)
+        self.javascript(
+            "window.scrollTo(0, document.querySelectorAll('h2')[4].getBoundingClientRect().top"
+            " + window.scrollY + 80); true"
+        )
+        wait_until(lambda: self.tab.outline.currentItem() is repeated)
+        self.assertNotEqual(repeated.data(0, Qt.ItemDataRole.UserRole), root.child(3).data(0, Qt.ItemDataRole.UserRole))
+        self.javascript("window.scrollTo(0, document.documentElement.scrollHeight); true")
+        wait_until(lambda: self.tab.outline.currentItem() is root.child(6))
+        self.assertEqual(self.tab.outline.currentItem().text(0), "Final")
+
+    def test_outline_clears_when_reloaded_document_has_no_headings(self):
+        wait_until(lambda: self.tab.outline.currentItem() is self.tab.outline.topLevelItem(0))
+        self.replace("Plain paragraph.\n\n" * 80)
+        self.javascript("window.scrollTo(0, 500); true")
+        QTest.qWait(150)
+        self.assertIsNone(self.tab.outline.currentItem())
+        self.assertEqual(self.tab.outline.topLevelItemCount(), 0)
+        self.assertFalse(self.tab.outline_button.isEnabled())
+        self.assertTrue(self.tab.outline.isHidden())
+        self.replace("# Headings return\n\n" + "Paragraph.\n\n" * 80)
+        wait_until(lambda: self.tab.outline.currentItem() is self.tab.outline.topLevelItem(0))
+        self.assertTrue(self.tab.outline_button.isEnabled())
+        self.assertFalse(self.tab.outline.isHidden())
+
     def assert_fits_width(self):
         wait_until(lambda: abs(self.javascript(
             "document.querySelector('.markdown-body').getBoundingClientRect().width"
