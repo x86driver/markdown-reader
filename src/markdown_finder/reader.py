@@ -23,9 +23,15 @@ from .rendering import RenderedDocument, render_document
 _OUTLINE_ANCHOR_SCRIPT = """
 (() => {
     // Cache elements, not positions: layout can change with zoom or images.
-    const headings = window.__markdownFinderOutlineHeadings ||= Array.from(
+    const allHeadings = window.__markdownFinderOutlineHeadings ||= Array.from(
         document.querySelectorAll('h1[id], h2[id], h3[id], h4[id], h5[id], h6[id]')
     );
+    const hasDetails = window.__markdownFinderHasDetails ??= !!document.querySelector('details');
+    // Hidden headings have no usable position; their ancestors can be opened
+    // by chapter navigation, but scroll tracking must only use visible ones.
+    const headings = hasDetails
+        ? allHeadings.filter(heading => !heading.closest('details:not([open])'))
+        : allHeadings;
     if (!headings.length) return '';
     const root = document.documentElement;
     // A short final section may never reach the top of the viewport.
@@ -439,6 +445,11 @@ class DocumentTab(QWidget):
                     # current item here must never move the document itself.
                     self.outline.setCurrentItem(item)
                     self._reveal_outline_item(item)
+                elif anchor == "":
+                    # A document can have all of its headings inside closed
+                    # disclosures, leaving no visible chapter to highlight.
+                    self.outline.setCurrentItem(None)
+                    self.outline.clearSelection()
             if self._outline_sync_requested:
                 self._schedule_outline_sync()
 
@@ -621,7 +632,10 @@ class DocumentTab(QWidget):
         encoded = json.dumps(fragment)
         self.page.runJavaScript(
             "{ const target = document.getElementById(" + encoded + ");"
-            " if (target) target.scrollIntoView({block: 'start'}); }"
+            " if (target) {"
+            " for (let parent = target.parentElement; parent; parent = parent.parentElement)"
+            " if (parent.tagName === 'DETAILS') parent.open = true;"
+            " target.scrollIntoView({block: 'start'}); } }"
         )
 
     def focus_find(self):
@@ -671,6 +685,13 @@ class DocumentTab(QWidget):
             self._schedule_restore()
             self._schedule_outline_sync()
         if watched in (self.view, self._scroll_input_widget):
+            # Toggling a short disclosure may leave the page's total size and
+            # scroll position unchanged, so WebEngine emits neither signal.
+            if event.type() == QEvent.Type.MouseButtonRelease or (
+                event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter)
+            ):
+                self._schedule_outline_sync()
             if event.type() in (QEvent.Type.Wheel, QEvent.Type.MouseButtonPress, QEvent.Type.TouchBegin):
                 self._cancel_session_restore()
             elif event.type() == QEvent.Type.KeyPress:

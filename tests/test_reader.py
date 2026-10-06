@@ -4,6 +4,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
 
+import json
 from pathlib import Path
 import tempfile
 import threading
@@ -11,7 +12,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QCoreApplication, QEvent, Qt, QUrl
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, Qt, QUrl
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -122,6 +123,93 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(self.tab.view.url(), before)
         self.assertEqual(len(self.external), 1)
         self.assertTrue(self.tab.loaded)
+
+    def test_details_native_mouse_keyboard_and_markdown_dom(self):
+        self.replace(
+            '# 文件\n\n<details>\n<summary>展開 **說明**</summary>\n'
+            '## 內文\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n'
+            '```python\nprint("hello")\n```\n</details>\n'
+            '<details open><summary>預設展開</summary>可見內容</details>\n'
+        )
+        self.assertEqual(self.javascript("document.querySelectorAll('details').length"), 2)
+        self.assertFalse(self.javascript("document.querySelector('details').open"))
+        self.assertTrue(self.javascript("document.querySelectorAll('details')[1].open"))
+        self.assertEqual(self.javascript("document.querySelector('summary').parentElement.tagName"), "DETAILS")
+        self.assertEqual(self.javascript("document.querySelector('summary strong').textContent"), "說明")
+        self.assertEqual(self.javascript(
+            "Array.from(document.querySelectorAll('details td')).map(td => td.textContent).join(',')"
+        ), "1,2")
+        position = self.javascript(
+            "JSON.stringify((() => { const r = document.querySelector('summary').getBoundingClientRect();"
+            " return [r.left + 35, r.top + r.height / 2]; })())"
+        )
+        x, y = json.loads(position)
+        target = self.tab.view.focusProxy() or self.tab.view
+        QTest.mouseClick(target, Qt.MouseButton.LeftButton, pos=QPoint(round(x), round(y)))
+        wait_until(lambda: self.javascript("document.querySelector('details').open"))
+        self.assertIn("hello", self.javascript("document.querySelector('details pre').innerText"))
+        self.javascript("document.querySelector('summary').focus(); true")
+        QTest.keyClick(target, Qt.Key.Key_Space)
+        wait_until(lambda: not self.javascript("document.querySelector('details').open"))
+        self.assertEqual(self.errors, [])
+
+    def test_anchor_and_outline_navigation_open_nested_details(self):
+        self.replace(
+            '# 文件\n\n[跳至內部](#內部章節)\n\n' + '前言段落\n\n' * 30
+            + '<details>\n<summary>外層</summary>\n<details>\n<summary>內層</summary>\n'
+            '## 內部章節\n\n' + '內文段落\n\n' * 35
+            + '</details>\n</details>\n## 外部章節\n\n' + '後記段落\n\n' * 30
+        )
+        item = self.tab.outline.topLevelItem(0).child(0)
+        self.assertEqual(item.text(0), "內部章節")
+        self.javascript("document.querySelector('a').click(); true")
+        wait_until(lambda: self.javascript("Array.from(document.querySelectorAll('details')).every(d => d.open)"))
+        wait_until(lambda: self.tab.outline.currentItem() is item)
+        wait_until(lambda: 0 <= self.javascript("document.getElementById('內部章節').getBoundingClientRect().top") <= 49)
+        self.javascript("document.querySelectorAll('details').forEach(d => d.open = false); window.scrollTo(0, 0); true")
+        wait_until(lambda: self.tab.outline.currentItem() is self.tab.outline.topLevelItem(0))
+        self.tab._outline_clicked(item)
+        wait_until(lambda: self.javascript("Array.from(document.querySelectorAll('details')).every(d => d.open)"))
+        wait_until(lambda: self.tab.outline.currentItem() is item)
+        self.assertEqual(self.errors, [])
+
+    def test_outline_ignores_hidden_details_headings_including_last_section(self):
+        self.replace(
+            '# 文件\n\n' + '前言段落\n\n' * 35
+            + '<details>\n<summary>隱藏章節</summary>\n## 隱藏章節\n\n'
+            + '內文段落\n\n' * 35 + '</details>\n## 可見章節\n\n'
+            + '後記段落\n\n' * 35
+            + '<details>\n<summary>隱藏尾章</summary>\n## 隱藏尾章\n\n結尾\n</details>\n'
+        )
+        root = self.tab.outline.topLevelItem(0)
+        self.assertEqual(root.childCount(), 3)
+        self.javascript("window.scrollTo(0, 0); true")
+        wait_until(lambda: self.tab.outline.currentItem() is root)
+        self.javascript("window.scrollTo(0, document.documentElement.scrollHeight); true")
+        wait_until(lambda: self.tab.outline.currentItem() is root.child(1))
+        self.assertEqual(self.tab.outline.currentItem().text(0), "可見章節")
+        self.assertEqual(self.errors, [])
+
+    def test_short_details_collapse_clears_hidden_chapter_highlight(self):
+        self.replace('<details open>\n<summary>說明</summary>\n## 唯一章節\n\n短內文\n</details>\n')
+        item = self.tab.outline.topLevelItem(0)
+        wait_until(lambda: self.tab.outline.currentItem() is item)
+        initial_height = self.javascript("document.documentElement.scrollHeight")
+        position = self.javascript(
+            "JSON.stringify((() => { const r = document.querySelector('summary').getBoundingClientRect();"
+            " return [r.left + 35, r.top + r.height / 2]; })())"
+        )
+        x, y = json.loads(position)
+        target = self.tab.view.focusProxy() or self.tab.view
+        QTest.mouseClick(target, Qt.MouseButton.LeftButton, pos=QPoint(round(x), round(y)))
+        wait_until(lambda: not self.javascript("document.querySelector('details').open"))
+        wait_until(lambda: self.tab.outline.currentItem() is None)
+        self.assertEqual(self.tab.outline.selectedItems(), [])
+        self.assertEqual(self.javascript("document.documentElement.scrollHeight"), initial_height)
+        self.javascript("document.querySelector('summary').focus(); true")
+        QTest.keyClick(target, Qt.Key.Key_Return)
+        wait_until(lambda: self.javascript("document.querySelector('details').open"))
+        wait_until(lambda: self.tab.outline.currentItem() is item)
 
     def test_unicode_anchor_and_find_zoom(self):
         self.replace("# 開始\n\n[跳到細節](#細節)\n\n" + "段落 needle\n\n" * 90 + "## 細節\n\n結束 needle\n")

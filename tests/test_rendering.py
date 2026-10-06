@@ -106,6 +106,75 @@ class RenderingTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt; &amp;", document.html)
         self.assertFalse(HTMLDocument(document.html).attributes("script"))
 
+    def test_details_render_markdown_body_and_outline_without_blank_lines(self):
+        document = self.render(
+            '<details>\n<summary>展開 **說明** `code`</summary>\n'
+            '## 內部章節\n- 清單\n\n'
+            '| A | B |\n|---|---|\n| 1 | 2 |\n\n'
+            '```python\nprint("ok")\n```\n</details>\n## 外部章節\n'
+        )
+        parsed = HTMLDocument(document.html)
+        self.assertEqual(parsed.attributes("details"), [{}])
+        self.assertEqual(parsed.attributes("summary"), [{}])
+        self.assertIn('<summary>展開 <strong>說明</strong> <code>code</code></summary>', document.html)
+        self.assertEqual([heading.title for heading in document.headings], ["內部章節", "外部章節"])
+        self.assertEqual(len(parsed.attributes("ul")), 1)
+        self.assertEqual(len(parsed.attributes("table")), 1)
+        self.assertEqual(len(parsed.attributes("pre")), 1)
+        self.assertIn('</details><h2 id="外部章節">', document.html)
+
+    def test_nested_compact_and_multiline_summaries(self):
+        document = self.render(
+            '<details OPEN="false">\n<summary>\n多行 **摘要**\n</summary>\n'
+            '<details><summary>內層</summary>*內容*</details>\n</details>\n'
+            '<DETAILS><SUMMARY>另一區塊</SUMMARY>內容</DETAILS>\n'
+        )
+        parsed = HTMLDocument(document.html)
+        self.assertEqual(parsed.attributes("details"), [{"open": None}, {}, {}])
+        self.assertEqual(len(parsed.attributes("summary")), 3)
+        self.assertIn('<summary>\n多行 <strong>摘要</strong>\n</summary>', document.html)
+        self.assertIn('<details><summary>內層</summary><em>內容</em></details>', document.html)
+        self.assertIn('<details><summary>另一區塊</summary>內容</details>', document.html)
+
+    def test_details_inside_blockquotes_lists_and_reference_links(self):
+        document = self.render(
+            '> <details>\n> <summary>[摘要][link]</summary>\n>\n> 引用內容\n> </details>\n\n'
+            '- <details>\n  <summary>清單摘要</summary>\n\n  清單內容\n  </details>\n\n'
+            '[link]: https://example.com\n'
+        )
+        parsed = HTMLDocument(document.html)
+        self.assertEqual(len(parsed.attributes("details")), 2)
+        self.assertIn('<blockquote><details><summary><a href="https://example.com">摘要</a></summary>', document.html)
+        self.assertIn('<li><details><summary>清單摘要</summary>', document.html)
+
+    def test_disclosure_attributes_are_stripped_and_other_html_stays_escaped(self):
+        document = self.render(
+            '<details open onclick="alert(1)" id="fn1" style="display:none" name="group">\n'
+            '<summary onmouseover="alert(2)"><img src="x" onerror="alert(3)">摘要</summary>\n'
+            '<script>alert(4)</script>\n<iframe src="https://example.com"></iframe>\n'
+            '[bad](javascript:alert%281%29)\n</details>\n'
+            '<details-other>text</details-other>\n<summary-other>text</summary-other>\n'
+        )
+        parsed = HTMLDocument(document.html)
+        self.assertEqual(parsed.attributes("details"), [{"open": None}])
+        self.assertEqual(parsed.attributes("summary"), [{}])
+        for tag in ("img", "script", "iframe", "a", "details-other", "summary-other"):
+            self.assertFalse(parsed.attributes(tag))
+        self.assertIn('&lt;img src=', document.html)
+        self.assertIn('&lt;script&gt;', document.html)
+
+    def test_disclosure_tags_in_code_and_escaped_text_stay_literal(self):
+        document = self.render(
+            '```html\n<details><summary>範例</summary></details>\n```\n\n'
+            '    <details>\n    <summary>縮排範例</summary>\n    </details>\n\n'
+            '`<details><summary>行內範例</summary></details>`\n\n'
+            r'\<details>\<summary>跳脫範例\</summary>\</details>' + '\n'
+        )
+        parsed = HTMLDocument(document.html)
+        self.assertFalse(parsed.attributes("details"))
+        self.assertFalse(parsed.attributes("summary"))
+        self.assertEqual(len(parsed.attributes("pre")), 2)
+
     def test_raw_html_and_unsafe_links_do_not_become_active_elements(self):
         document = self.render(
             '<script>alert(1)</script>\n\n<img src="x" onerror="alert(1)">\n\n'
