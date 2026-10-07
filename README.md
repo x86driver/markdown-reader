@@ -67,6 +67,41 @@ python3 scripts/install_desktop.py
 版本採用 `MAJOR.MINOR.PATCH`，唯一來源是 `src/markdown_finder/_version.py`。
 每次交付改版都會升版並更新 [CHANGELOG.md](CHANGELOG.md)，詳細規則記錄於 [AGENTS.md](AGENTS.md)。目前 `0.x` 階段，相容修正升 PATCH，新功能或不相容調整升 MINOR；從穩定的 `1.0.0` 起，不相容調整升 MAJOR。升版後執行 `uv lock` 與 `uv sync --locked`，確保套件與鎖定檔同步。
 
+## 本機診斷
+
+程式啟動時會自動開啟診斷介面。發生視窗異常時，保留程式執行，直接請 Codex
+debug 即可；不需要 sudo，也不需要先重新開啟或修正視窗，以免現場狀態消失。
+此功能須先正常關閉舊版並重新開啟新版，之後每次啟動都會提供。
+
+在專案目錄查詢：
+
+```bash
+./run.sh --debug list
+./run.sh --debug snapshot
+./run.sh --debug events
+./run.sh --debug threads
+```
+
+`list` 顯示正在執行的 PID、實際載入的版本與診斷入口；`snapshot` 讀取視窗、
+螢幕、恢復旗標與計時器、閱讀縮放及 CSS 捲動位置、背景工作，以及最近事件。
+`events` 提供最近 256 筆啟用、移動、尺寸、狀態、螢幕與 suspend/resume 通知，
+`threads` 提供 Python 執行緒堆疊。多個程式同時執行時，用 PID 指定：
+
+```bash
+./run.sh --debug snapshot --debug-pid 12345
+```
+
+查詢不會開啟新視窗、切換焦點或修改閱讀狀態，輸出為 JSON。
+介面使用 `$XDG_RUNTIME_DIR/markdown-finder/debug-<PID>.sock`；未設定 runtime
+目錄時使用 `/tmp/markdown-finder-<UID>/`。目錄權限為 0700、socket 為 0600，
+只供同一位本機使用者存取，指令限於上述資料查詢。
+
+Qt 物件由 GUI 執行緒讀取；若 GUI 沒有回應，`snapshot` 會回報 `gui_timeout`，
+並附上最後記錄與 Python 堆疊。`events` 和 `threads` 可由獨立的診斷執行緒回覆。
+這是狀態診斷介面，Python 堆疊不包含純 C++ 執行緒的原生堆疊。Wayland 下 Qt
+的可用範圍可能包含工作列，全域位置也可能不準確；診斷資料保留原始回報，
+需要與桌面工作區資訊一起判讀。事件只保存在記憶體中，程式關閉時移除入口。
+
 ## 操作
 
 | 按鍵／動作 | 功能 |

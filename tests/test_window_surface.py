@@ -5,6 +5,7 @@ offscreen/minimal platforms cannot reproduce a native window being replaced.
 """
 
 from pathlib import Path
+import threading
 import tempfile
 import time
 import unittest
@@ -14,6 +15,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from markdown_finder.app import FinderWindow, configure_application
+from markdown_finder.diagnostics import DiagnosticInterface, query_endpoint
 from markdown_finder.reader import DocumentTab
 
 
@@ -115,14 +117,6 @@ class NativeWindowSurfaceTests(unittest.TestCase):
         self.assertEqual(self.window.windowHandle().surfaceType(), self.surface_type)
         self.assertEqual(self.window.window_transitions, [])
 
-    def wait_for_window_recovery(self):
-        guard = self.window._window_geometry_guard
-        wait_until(lambda: not guard._remaximizing
-                   and not guard._check_timer.isActive()
-                   and not guard._retry_timer.isActive()
-                   and not guard._maximize_timer.isActive()
-                   and not guard._settle_timer.isActive())
-
     def open_document(self, path):
         tab = self.window.open_document(path)
         self.assertIsNotNone(tab)
@@ -209,13 +203,13 @@ class NativeWindowSurfaceTests(unittest.TestCase):
         wait_until(lambda: self.window.size() == normal_size)
         self.window.showMaximized()
         wait_until(lambda: self.window.isMaximized() and not self.window.isFullScreen())
-        self.wait_for_window_recovery()
+        QTest.qWait(500)
         maximized_size = self.window.size()
         self.window.showFullScreen()
         wait_until(lambda: self.window.isMaximized() and not self.window.isFullScreen())
         wait_until(lambda: self.window.size() == maximized_size)
         self.window._window_geometry_guard._prepare_for_sleep(False)
-        self.wait_for_window_recovery()
+        QTest.qWait(1700)
         self.assertTrue(self.window.isMaximized())
         self.assertFalse(self.window.isFullScreen())
         self.assertEqual(self.window.size(), maximized_size)
@@ -227,31 +221,34 @@ class NativeWindowSurfaceTests(unittest.TestCase):
         wait_until(lambda: not self.window.isMaximized() and self.window.size() == normal_size)
         self.assert_stable_window()
 
-    def test_window_reactivation_preserves_bounds_reader_and_native_window(self):
+    def test_activation_and_live_diagnostics_preserve_maximized_reader_without_roundtrip(self):
         self.show_window()
-        tab = self.open_document(self.first)
-        tab._set_zoom(1.3)
-        self.scroll_to(tab, 900)
+        self.window._diagnostics = DiagnosticInterface(self.window, directory=self.root / "diagnostics")
+        reader = self.open_document(self.first)
+        reader._set_zoom(1.3)
+        self.scroll_to(reader, 900)
         normal_size = self.window.size()
         self.window.showMaximized()
-        self.wait_for_window_recovery()
-        maximized_size = self.window.size()
+        QTest.qWait(1700)
+        size = self.window.size()
         states = []
         self.window.windowHandle().windowStateChanged.connect(states.append)
-        for activation in range(2):
+        for _ in range(2):
             QCoreApplication.sendEvent(self.window, QEvent(QEvent.Type.WindowDeactivate))
             QCoreApplication.sendEvent(self.window, QEvent(QEvent.Type.WindowActivate))
-            wait_until(lambda: len(states) >= (activation + 1) * 2
-                       and self.window.isMaximized()
-                       and not self.window._window_geometry_guard._remaximizing)
-            wait_until(lambda: self.window.size() == maximized_size)
-        self.wait_for_window_recovery()
-        self.assertTrue(self.window.isMaximized())
-        self.assertFalse(self.window.isFullScreen())
-        self.assertEqual(self.window.size(), maximized_size)
-        self.assertIs(self.window.current_reader(), tab)
-        self.assertAlmostEqual(tab.view.zoomFactor(), 1.3)
-        self.assertAlmostEqual(javascript(tab, "window.scrollY"), 900, delta=5)
+            responses = []
+            worker = threading.Thread(target=lambda: responses.append(
+                query_endpoint(self.window._diagnostics.path, "snapshot")))
+            worker.start()
+            wait_until(lambda: not worker.is_alive())
+            worker.join()
+            self.assertTrue(responses[0]["ok"])
+            self.assertTrue(responses[0]["data"]["window"]["maximized"])
+        QTest.qWait(1600)
+        self.assertEqual(states, [])
+        self.assertEqual(self.window.size(), size)
+        self.assertAlmostEqual(reader.view.zoomFactor(), 1.3)
+        self.assertAlmostEqual(javascript(reader, "window.scrollY"), 900, delta=5)
         self.assert_stable_window()
         self.window.showNormal()
         wait_until(lambda: not self.window.isMaximized() and self.window.size() == normal_size)

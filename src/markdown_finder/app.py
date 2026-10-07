@@ -820,6 +820,9 @@ class FinderWindow(QMainWindow):
 
     def closeEvent(self, event):
         if not self._closing:
+            diagnostics = getattr(self, "_diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.stop()
             self._window_geometry_guard.stop()
             self.save_session()
             self._closing = True
@@ -870,19 +873,43 @@ def configure_application(app: QApplication):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="用 Qt 快速搜尋本機 Markdown 檔案")
     parser.add_argument("--version", action="version", version=f"markdown-finder {__version__}")
+    parser.add_argument("--debug", choices=("list", "snapshot", "events", "threads"),
+                        help="查詢執行中程式的本機診斷介面，不開啟新視窗")
+    parser.add_argument("--debug-pid", type=int, help="指定要診斷的程序 PID（搭配 --debug）")
     parser.add_argument("--root", type=Path, default=Path.home(), help="搜尋根目錄（預設為家目錄）")
     parser.add_argument("files", nargs="*", type=Path, help="啟動時在分頁開啟的 Markdown 文件")
     args = parser.parse_args(argv)
+    if args.debug:
+        from .diagnostics import query_running, running_instances
+
+        try:
+            response = ({"ok": True, "data": running_instances()} if args.debug == "list"
+                        else query_running(args.debug, args.debug_pid))
+        except (OSError, ValueError, ConnectionError) as error:
+            print(f"診斷失敗：{error}", file=sys.stderr)
+            return 1
+        print(json.dumps(response, ensure_ascii=False, indent=2))
+        return 0 if response["ok"] else 1
+    if args.debug_pid is not None:
+        parser.error("--debug-pid 必須搭配 --debug")
     root = args.root.expanduser().absolute()
     if not root.is_dir():
         parser.error(f"搜尋根目錄不存在或無法存取：{root}")
     app = QApplication([sys.argv[0]])
     configure_application(app)
     window = FinderWindow(root)
+    from .diagnostics import DiagnosticInterface
+
+    try:
+        window._diagnostics = DiagnosticInterface(window)
+    except OSError as error:
+        print(f"本機診斷介面無法啟動：{error}", file=sys.stderr)
     window.show()
     for path in args.files:
         window.open_document(path)
     result = app.exec()
+    if getattr(window, "_diagnostics", None) is not None:
+        window._diagnostics.stop()
     # WebEngine pages must be destroyed while QApplication and its default
     # profile are still alive, including when the last window stops the loop.
     window.deleteLater()

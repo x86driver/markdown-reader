@@ -25,7 +25,6 @@ class WindowGeometryGuard(QObject):
         self.window = window
         self._stopped = False
         self._remaximizing = False
-        self._maximize_attempts = 0
         self._refresh_maximized = False
         self._retry_refresh = False
         self._maximized = window.isMaximized()
@@ -48,10 +47,6 @@ class WindowGeometryGuard(QObject):
         self._maximize_timer.setSingleShot(True)
         self._maximize_timer.setInterval(100)
         self._maximize_timer.timeout.connect(self._finish_maximize)
-        self._settle_timer = QTimer(self)
-        self._settle_timer.setSingleShot(True)
-        self._settle_timer.setInterval(200)
-        self._settle_timer.timeout.connect(self._complete_remaximize)
 
         # Old settings may already contain the unsupported fullscreen state.
         self._leave_fullscreen()
@@ -81,35 +76,22 @@ class WindowGeometryGuard(QObject):
                 self._handle = handle
                 handle.screenChanged.connect(self._desktop_changed)
             self._schedule_check()
-        elif kind == QEvent.Type.WindowActivate:
-            self._window_activated()
         elif kind == QEvent.Type.WindowStateChange:
-            state = self.window.windowState()
-            if self._remaximizing and self._settle_timer.isActive():
-                if (not event.spontaneous() and event.oldState() & Qt.WindowState.WindowMaximized
-                        and not state & (Qt.WindowState.WindowMaximized
-                                         | Qt.WindowState.WindowFullScreen | Qt.WindowState.WindowMinimized)):
-                    # A direct showNormal() request cancels the repair; native
-                    # acknowledgements remain protected until they settle.
-                    self._settle_timer.stop()
-                    self._remaximizing = False
-                else:
-                    self._settle_timer.start()
             if not self._remaximizing:
+                state = self.window.windowState()
                 if not state & (Qt.WindowState.WindowFullScreen | Qt.WindowState.WindowMinimized):
                     self._maximized = bool(state & Qt.WindowState.WindowMaximized)
                     if not self._maximized and event.oldState() & Qt.WindowState.WindowMaximized:
                         self._restore_normal = True
-                    # Late native maximize acknowledgements can carry a
-                    # transient normalGeometry. The last windowed resize/move
-                    # already captured the user's size; keep that snapshot.
+                    elif self._maximized and not event.oldState() & (
+                        Qt.WindowState.WindowMaximized | Qt.WindowState.WindowFullScreen
+                    ):
+                        self._normal_geometry = self.window.normalGeometry()
                 self._schedule_check()
         elif kind in (QEvent.Type.Resize, QEvent.Type.ScreenChangeInternal):
             self._remember_normal_geometry()
             if self._remaximizing and self._maximize_timer.isActive():
                 self._maximize_timer.start()
-            elif self._remaximizing and self._settle_timer.isActive():
-                self._settle_timer.start()
             else:
                 self._schedule_check()
         elif kind == QEvent.Type.Move:
@@ -161,19 +143,9 @@ class WindowGeometryGuard(QObject):
 
     def _application_state_changed(self, state):
         if state == Qt.ApplicationState.ApplicationActive:
-            self._window_activated()
-
-    def _window_activated(self):
-        if (self._stopped or self._remaximizing or not self.window.isVisible()
-                or self.window.isMinimized()):
-            return
-        # A window can reactivate while the application stays active (e.g.
-        # after closing About). A stale maximized size can also look smaller
-        # than QScreen's full-output work area, which may include the dock.
-        # Ask the compositor to reapply its work area on every activation.
-        self._refresh_maximized = True
-        self._schedule_check()
-        self._retry_timer.start()
+            self._schedule_check()
+            if not self._stopped:
+                self._retry_timer.start()
 
     @Slot(bool)
     def _prepare_for_sleep(self, sleeping):
@@ -195,7 +167,6 @@ class WindowGeometryGuard(QObject):
             # Passing directly from fullscreen to maximized makes Qt replace
             # normalGeometry with the fullscreen size. Restore normal first.
             self._remaximizing = self._maximized
-            self._maximize_attempts = 0
             self._restore_normal = True
             state &= ~(Qt.WindowState.WindowFullScreen | Qt.WindowState.WindowMaximized)
             self.window.setWindowState(state)
@@ -244,7 +215,6 @@ class WindowGeometryGuard(QObject):
                 oversized |= window.height() >= screen.geometry().height()
             if refresh or oversized:
                 self._remaximizing = True
-                self._maximize_attempts = 0
                 window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMaximized)
                 self._maximize_timer.start()
             return
@@ -269,26 +239,11 @@ class WindowGeometryGuard(QObject):
         self._remember_normal_geometry()
 
     def _finish_maximize(self):
-        self._settle_timer.stop()
         if not self._stopped and self.window.isVisible() and not self.window.isMinimized():
             # A Wayland configure may suggest a different normal size during
             # the round trip. Keep the user's size for later unmaximizing.
             self._restore_normal_geometry()
-            state = self.window.windowState() & ~Qt.WindowState.WindowFullScreen
-            self.window.setWindowState(state | Qt.WindowState.WindowMaximized)
-            self._maximize_attempts += 1
-            # Wayland can deliver earlier normal-state/size acknowledgements
-            # after this request. Do not treat them as a new user geometry.
-            self._settle_timer.start()
-            return
-        self._complete_remaximize()
-
-    def _complete_remaximize(self):
-        if (not self._stopped and self.window.isVisible() and not self.window.isMinimized()
-                and not self.window.isFullScreen() and not self.window.isMaximized()
-                and self._maximize_attempts < 2):
-            self._finish_maximize()
-            return
+            self.window.setWindowState(self.window.windowState() | Qt.WindowState.WindowMaximized)
         self._remaximizing = False
         self._schedule_check()
 
@@ -298,7 +253,6 @@ class WindowGeometryGuard(QObject):
         self._check_timer.stop()
         self._retry_timer.stop()
         self._maximize_timer.stop()
-        self._settle_timer.stop()
         self._leave_fullscreen()
         if self._remaximizing:
             self._restore_normal_geometry()

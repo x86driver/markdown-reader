@@ -54,3 +54,16 @@ Keep `QSettings` organization/application names stable to preserve existing
 reading sessions. Test against temporary settings and fixture documents, not
 the user's real session. Do not force-stop their running app to show an update;
 let the user close and reopen it normally so the latest reading state is saved.
+
+## Live diagnostics
+
+For an already running app, start with `./run.sh --debug list`, then query
+`snapshot`, `events`, and `threads`. These commands use the app's local,
+read-only diagnostic socket and do not need sudo or a debugger attachment.
+If multiple instances are listed, select the relevant `--debug-pid <PID>`.
+Use the reported runtime version rather than assuming it matches the checkout.
+
+Capture `snapshot` and `events` before changing geometry or restarting, so the
+original window state and recent transitions are preserved for diagnosis.
+If the GUI times out, `threads` and `events` can still be served by the separate
+diagnostic thread. The interface reports Python stacks, not native C++ stacks.
