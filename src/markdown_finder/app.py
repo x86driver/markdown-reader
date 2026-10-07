@@ -26,6 +26,7 @@ from .engine import ScanStats, SearchHit, SearchResults
 from .workers import ScanThread, SearchThread
 from .reader import DocumentTab
 from .session import SESSION_KEY, read_session
+from .window_geometry import WindowGeometryGuard
 
 
 def display_path(path: str | Path) -> str:
@@ -181,6 +182,7 @@ class FinderWindow(QMainWindow):
         geometry = self.settings.value("window_geometry")
         if geometry is not None:
             self.restoreGeometry(geometry)
+        self._window_geometry_guard = WindowGeometryGuard(self)
 
         self.search_worker = SearchThread(self)
         self.search_worker.completed.connect(self._search_completed)
@@ -818,6 +820,7 @@ class FinderWindow(QMainWindow):
 
     def closeEvent(self, event):
         if not self._closing:
+            self._window_geometry_guard.stop()
             self.save_session()
             self._closing = True
             self.session_timer.stop()
