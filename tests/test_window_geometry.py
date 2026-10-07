@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRect, QSettings, QSize, Qt, Signal
 from PySide6.QtTest import QTest
@@ -148,6 +148,53 @@ class WindowGeometryTests(unittest.TestCase):
             change.assert_not_called()
         self.assertTrue(self.window.isMaximized())
         self.assertEqual(self.window.size(), size)
+
+    def test_recorded_dock_overflow_recovers_on_window_activation(self):
+        # Qt's availableGeometry stays at 1080, exactly as in the live incident.
+        self.screen.area = QRect(0, 0, 1920, 1080)
+        self.window.showMaximized()
+        QTest.qWait(450)
+        native_id = int(self.window.winId())
+        with patch.object(self.guard._work_area_probe, "area", return_value=QRect(0, 32, 1920, 982)), \
+                patch.object(self.window, "frameGeometry", return_value=QRect(0, -38, 1920, 1048)), \
+                patch.object(self.window, "setWindowState", wraps=self.window.setWindowState) as change:
+            QCoreApplication.sendEvent(self.window, QEvent(QEvent.Type.WindowActivate))
+            QTest.qWait(650)
+            # Includes a second bad configure: the cooldown prevents a loop.
+            self.assertEqual(change.call_count, 2)
+            self.assertFalse(change.call_args_list[0].args[0] & Qt.WindowState.WindowMaximized)
+            self.assertTrue(change.call_args_list[1].args[0] & Qt.WindowState.WindowMaximized)
+        self.assertEqual(int(self.window.winId()), native_id)
+        self.assertTrue(self.window.isVisible())
+
+    def test_confirmed_healthy_work_area_avoids_activation_and_resume_roundtrip(self):
+        self.screen.area = QRect(0, 0, 1920, 1080)
+        self.window.showMaximized()
+        QTest.qWait(450)
+        with patch.object(self.guard._work_area_probe, "area", return_value=QRect(0, 32, 1920, 982)), \
+                patch.object(self.window, "frameGeometry", return_value=QRect(0, -38, 1920, 982)), \
+                patch.object(self.window, "setWindowState", wraps=self.window.setWindowState) as change:
+            self.guard._prepare_for_sleep(False)
+            QCoreApplication.sendEvent(self.window, QEvent(QEvent.Type.WindowActivate))
+            self.app.applicationStateChanged.emit(Qt.ApplicationState.ApplicationActive)
+            QTest.qWait(1600)
+            change.assert_not_called()
+
+    def test_resume_waits_for_work_area_query_before_changing_window_state(self):
+        self.window.showMaximized()
+        QTest.qWait(450)
+        with patch.object(type(self.guard._work_area_probe), "pending", new_callable=PropertyMock) as pending, \
+                patch.object(self.window, "setWindowState", wraps=self.window.setWindowState) as change:
+            pending.return_value = True
+            self.guard._prepare_for_sleep(False)
+            self.guard._recover()
+            change.assert_not_called()
+            self.assertTrue(self.guard._refresh_maximized)
+            pending.return_value = False
+            with patch.object(self.guard._work_area_probe, "area", return_value=self.screen.area):
+                self.guard._recover()
+                change.assert_not_called()
+            self.assertFalse(self.guard._refresh_maximized)
 
     def test_resume_does_not_unminimize_or_reopen_closed_window(self):
         self.window.showMinimized()

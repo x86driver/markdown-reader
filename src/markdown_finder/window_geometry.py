@@ -1,9 +1,12 @@
 """Recover desktop window bounds without replacing the native surface."""
 
 import sys
+import time
 
 from PySide6.QtCore import QObject, QEvent, QSize, QTimer, Qt, SLOT, Slot
 from PySide6.QtWidgets import QApplication, QWidget
+
+from .desktop_workarea import DesktopWorkAreaProbe
 
 
 _SLEEP_SIGNAL = (
@@ -15,7 +18,8 @@ _SLEEP_SIGNAL = (
 class WindowGeometryGuard(QObject):
     """Keep the reader windowed and reapply desktop bounds after resume.
 
-    Wayland does not expose reliable global positions or dock work areas.
+    Wayland does not expose reliable global positions or dock work areas;
+    GNOME's optional XWayland work-area hints supplement QScreen's bounds.
     Maximized windows must be sized by the compositor, rather than by setting
     their geometry to QScreen.availableGeometry().
     """
@@ -34,6 +38,10 @@ class WindowGeometryGuard(QObject):
         self._screen = None
         self._handle = None
         self._sleep_connection = None
+        self._last_repair_key = None
+        self._last_repair_at = float("-inf")
+        self._work_area_probe = DesktopWorkAreaProbe(self)
+        self._work_area_probe.ready.connect(self._schedule_check)
         self._check_timer = QTimer(self)
         self._check_timer.setSingleShot(True)
         self._check_timer.setInterval(200)
@@ -76,6 +84,9 @@ class WindowGeometryGuard(QObject):
                 self._handle = handle
                 handle.screenChanged.connect(self._desktop_changed)
             self._schedule_check()
+        elif kind == QEvent.Type.WindowActivate:
+            self._schedule_check()
+            self._retry_timer.start()
         elif kind == QEvent.Type.WindowStateChange:
             if not self._remaximizing:
                 state = self.window.windowState()
@@ -196,6 +207,14 @@ class WindowGeometryGuard(QObject):
         available = screen.availableGeometry()
         if not available.isValid():
             return
+        self._work_area_probe.request()
+        if self._work_area_probe.pending:
+            # Do not force a resume round trip before the desktop query can
+            # confirm whether this maximized window actually needs one.
+            return
+        desktop_area = self._work_area_probe.area(screen)
+        if desktop_area is not None:
+            available = desktop_area
         if not window.isMaximized() and self._restore_normal:
             self._restore_normal_geometry()
         frame = window.frameGeometry()
@@ -208,12 +227,20 @@ class WindowGeometryGuard(QObject):
         window.setMinimumSize(self._minimum_size.boundedTo(client_space))
         refresh, self._refresh_maximized = self._refresh_maximized, False
         if window.isMaximized():
-            # On Wayland, availableGeometry can include panels. A client as
-            # tall as the whole output cannot also leave room for them.
-            oversized = window.width() > available.width() or window.height() > available.height()
-            if QApplication.platformName().startswith("wayland"):
+            # Compare the whole frame, including Qt's client-side decoration.
+            # A couple of logical pixels tolerate fractional-scale rounding.
+            oversized = (frame.width() > available.width() + 2
+                         or frame.height() > available.height() + 2)
+            if desktop_area is None and QApplication.platformName().startswith("wayland"):
                 oversized |= window.height() >= screen.geometry().height()
-            if refresh or oversized:
+            if oversized or (refresh and desktop_area is None):
+                key = (id(screen), available.getRect())
+                now = time.monotonic()
+                # A compositor still settling after unlock may resend the bad
+                # size. Do not enter an endless maximize/resize flash loop.
+                if key == self._last_repair_key and now - self._last_repair_at < 2.0:
+                    return
+                self._last_repair_key, self._last_repair_at = key, now
                 self._remaximizing = True
                 window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMaximized)
                 self._maximize_timer.start()
@@ -253,6 +280,7 @@ class WindowGeometryGuard(QObject):
         self._check_timer.stop()
         self._retry_timer.stop()
         self._maximize_timer.stop()
+        self._work_area_probe.stop()
         self._leave_fullscreen()
         if self._remaximizing:
             self._restore_normal_geometry()

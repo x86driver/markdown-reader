@@ -241,6 +241,7 @@ class DiagnosticInterface(QObject):
                 "retry_refresh": guard._retry_refresh, "restore_normal": guard._restore_normal,
                 "normal_geometry": _rect(guard._normal_geometry),
                 "resume_signal_connected": guard._sleep_connection is not None,
+                "desktop_work_area": guard._work_area_probe.snapshot(window.screen()),
                 "timers": {
                     name: {"active": timer.isActive(), "remaining_ms": timer.remainingTime()}
                     for name, timer in (("check", guard._check_timer), ("retry", guard._retry_timer),

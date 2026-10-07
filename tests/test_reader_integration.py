@@ -123,6 +123,9 @@ class ReaderIntegrationTests(unittest.TestCase):
         javascript(tab, "window.scrollTo(0, 600); true")
         wait_until(lambda: javascript(tab, "window.scrollY") >= 500)
         original = javascript(tab, "window.scrollY")
+        # JavaScript completion can precede Qt's scrollPosition update. The
+        # app snapshots Qt's CSS-pixel position, as the native tests also do.
+        wait_until(lambda: abs(tab._css_scroll_position()[1] - original) < 3)
         text = self.first.read_text(encoding="utf-8").replace("中文閱讀測試", "更新後的標題")
         self.first.write_text(text, encoding="utf-8")
         tab.reload_document()

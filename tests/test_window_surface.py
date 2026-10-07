@@ -9,8 +9,9 @@ import threading
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
-from PySide6.QtCore import QCoreApplication, QEvent, QSettings
+from PySide6.QtCore import QCoreApplication, QEvent, QSettings, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -247,6 +248,53 @@ class NativeWindowSurfaceTests(unittest.TestCase):
         QTest.qWait(1600)
         self.assertEqual(states, [])
         self.assertEqual(self.window.size(), size)
+        self.assertAlmostEqual(reader.view.zoomFactor(), 1.3)
+        self.assertAlmostEqual(javascript(reader, "window.scrollY"), 900, delta=5)
+        self.assert_stable_window()
+
+        self.window.showNormal()
+        wait_until(lambda: not self.window.isMaximized() and self.window.size() == normal_size)
+        self.assert_stable_window()
+
+    def test_confirmed_dock_overflow_repair_preserves_native_reader(self):
+        self.show_window()
+        reader = self.open_document(self.first)
+        reader._set_zoom(1.3)
+        self.scroll_to(reader, 900)
+        normal_size = self.window.size()
+        self.window.showMaximized()
+        guard = self.window._window_geometry_guard
+        probe = guard._work_area_probe
+        if not probe.enabled:
+            self.skipTest("Requires Wayland with xprop and xrandr")
+        areas = []
+
+        def sample_area():
+            probe.request()
+            area = probe.area(self.window.screen())
+            if area is not None:
+                areas.append(area)
+                return True
+            return False
+
+        QTest.qWait(500)
+        wait_until(sample_area)
+        area = areas[-1]
+        maximized_size = self.window.size()
+        states = []
+        self.window.windowHandle().windowStateChanged.connect(states.append)
+        # Replay the captured frame overflow while preserving maximized state.
+        # The repair itself and subsequent configure use the real compositor.
+        frame = self.window.frameGeometry()
+        frame.setHeight(area.height() + 66)
+        with patch.object(self.window, "frameGeometry", return_value=frame):
+            guard._recover()
+        wait_until(lambda: Qt.WindowState.WindowNoState in states and self.window.isMaximized())
+        QTest.qWait(1700)
+        self.assertEqual(states, [Qt.WindowState.WindowNoState, Qt.WindowState.WindowMaximized])
+        self.assertLessEqual(self.window.frameGeometry().height(), area.height() + 2)
+        self.assertEqual(self.window.size(), maximized_size)
+        self.assertIs(self.window.current_reader(), reader)
         self.assertAlmostEqual(reader.view.zoomFactor(), 1.3)
         self.assertAlmostEqual(javascript(reader, "window.scrollY"), 900, delta=5)
         self.assert_stable_window()
