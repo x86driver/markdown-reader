@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRect, QSettings, QSize, Qt, Signal
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMainWindow
+from PySide6.QtWidgets import QApplication, QDialog, QMainWindow
 
 from markdown_finder.app import FinderWindow, configure_application
 from markdown_finder.window_geometry import WindowGeometryGuard
@@ -129,20 +129,110 @@ class WindowGeometryTests(unittest.TestCase):
     def test_activation_and_resume_preserve_healthy_normal_window(self):
         geometry = self.window.geometry()
         with patch.object(self.window, "setWindowState", wraps=self.window.setWindowState) as change:
+            QCoreApplication.sendEvent(self.window, QEvent(QEvent.Type.WindowActivate))
             self.app.applicationStateChanged.emit(Qt.ApplicationState.ApplicationActive)
             self.guard._prepare_for_sleep(False)
             QTest.qWait(1600)
             change.assert_not_called()
         self.assertEqual(self.window.geometry(), geometry)
 
+    def test_each_window_activation_reconfigures_maximized_bounds(self):
+        self.window.showMaximized()
+        QTest.qWait(450)
+        normal = QRect(self.guard._normal_geometry)
+        # Qt's work area can include the dock: the current client size looks
+        # smaller than that area, even if the compositor used stale bounds.
+        self.assertLess(self.window.height(), self.screen.availableGeometry().height())
+        states = []
+        self.window.windowHandle().windowStateChanged.connect(states.append)
+        for activation in range(2):
+            QCoreApplication.sendEvent(self.window, QEvent(QEvent.Type.WindowDeactivate))
+            QCoreApplication.sendEvent(self.window, QEvent(QEvent.Type.WindowActivate))
+            wait_until(lambda: states.count(Qt.WindowState.WindowNoState) == activation + 1
+                       and self.window.isMaximized() and not self.guard._remaximizing)
+        QTest.qWait(1500)
+        self.assertEqual(states.count(Qt.WindowState.WindowNoState), 2)
+        self.window.showNormal()
+        wait_until(lambda: self.window.geometry() == normal)
+
+    def test_window_activation_fits_offscreen_frame_without_application_signal(self):
+        size = self.window.size()
+        self.window.move(1850, 950)
+        QApplication.processEvents()
+        self.assertFalse(self.screen.area.contains(self.window.frameGeometry()))
+        QCoreApplication.sendEvent(self.window, QEvent(QEvent.Type.WindowActivate))
+        wait_until(lambda: self.screen.area.contains(self.window.frameGeometry()))
+        self.assertEqual(self.window.size(), size)
+        self.assertFalse(self.window.isMaximized())
+
+    def test_application_activation_reconfigures_maximized_bounds(self):
+        self.window.showMaximized()
+        QTest.qWait(450)
+        states = []
+        self.window.windowHandle().windowStateChanged.connect(states.append)
+        self.app.applicationStateChanged.emit(Qt.ApplicationState.ApplicationActive)
+        wait_until(lambda: Qt.WindowState.WindowNoState in states
+                   and self.window.isMaximized() and not self.guard._remaximizing)
+
+    def test_fullscreen_during_activation_repair_returns_to_maximized_only(self):
+        self.window.showMaximized()
+        QTest.qWait(450)
+        states = []
+        self.window.windowHandle().windowStateChanged.connect(
+            lambda _: states.append(self.window.windowState())
+        )
+        QCoreApplication.sendEvent(self.window, QEvent(QEvent.Type.WindowActivate))
+        wait_until(lambda: self.guard._remaximizing)
+        self.window.showFullScreen()
+        wait_until(lambda: self.window.isMaximized() and not self.window.isFullScreen()
+                   and not self.guard._remaximizing)
+        self.assertFalse(any(state & Qt.WindowState.WindowFullScreen
+                             and state & Qt.WindowState.WindowMaximized for state in states))
+
+    def test_unmaximize_during_activation_repair_keeps_normal_state_and_size(self):
+        normal = QRect(self.guard._normal_geometry)
+        self.window.showMaximized()
+        QTest.qWait(450)
+        QCoreApplication.sendEvent(self.window, QEvent(QEvent.Type.WindowActivate))
+        wait_until(lambda: self.guard._settle_timer.isActive())
+        self.window.showNormal()
+        wait_until(lambda: not self.window.isMaximized() and not self.guard._remaximizing
+                   and self.window.geometry() == normal)
+        QTest.qWait(1500)
+        self.assertFalse(self.window.isMaximized())
+        self.assertEqual(self.window.geometry(), normal)
+
+    def test_reactivation_after_dialog_rechecks_main_window_without_application_handler(self):
+        self.window.showMaximized()
+        QTest.qWait(450)
+        states = []
+        self.window.windowHandle().windowStateChanged.connect(states.append)
+        self.app.applicationStateChanged.disconnect(self.guard._application_state_changed)
+        dialog = QDialog(self.window)
+        dialog.setModal(True)
+        try:
+            dialog.show()
+            wait_until(lambda: self.app.activeWindow() is dialog)
+            self.assertEqual(states, [])
+            dialog.close()
+            self.window.activateWindow()
+            wait_until(lambda: Qt.WindowState.WindowNoState in states
+                       and self.window.isMaximized() and not self.guard._remaximizing)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self.app.applicationStateChanged.connect(self.guard._application_state_changed)
+
     def test_resume_does_not_unminimize_or_reopen_closed_window(self):
         self.window.showMinimized()
+        QCoreApplication.sendEvent(self.window, QEvent(QEvent.Type.WindowActivate))
         self.guard._prepare_for_sleep(False)
         QTest.qWait(1600)
         self.assertTrue(self.window.isMinimized())
         self.guard.stop()
         self.window.close()
         self.guard._prepare_for_sleep(False)
+        QCoreApplication.sendEvent(self.window, QEvent(QEvent.Type.WindowActivate))
         self.app.applicationStateChanged.emit(Qt.ApplicationState.ApplicationActive)
         QTest.qWait(300)
         self.assertFalse(self.window.isVisible())
