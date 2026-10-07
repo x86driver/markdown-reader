@@ -31,6 +31,16 @@ file or intermediate adjustment. Never reuse an already delivered version.
   GUI agree. Run checks appropriate to the actual change before delivery, and
   report the new version to the user.
 
+## Git commits: required for every delivered revision
+
+- 使用者要求：每次完成改版並通過相關驗證後，自動建立 Git commit，
+  不必再次詢問是否提交。
+- 提交標題與內文使用繁體中文，清楚描述此次變更，並在標題標示版本號。
+- 提交內容包含此次改版的版本、CHANGELOG、實作、測試及相關文件；
+  只加入本次工作的檔案，保留使用者其他尚未提交的修改。
+- 提交完成後確認成功，並在交付回覆中提供版本號與 commit 雜湊。
+  若 Git 提交失敗，說明實際原因，不得宣稱已提交。
+
 ## Installation and saved state
 
 The user's desktop launcher calls this checkout's `run.sh`. Ordinary in-place
