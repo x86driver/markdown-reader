@@ -1,9 +1,9 @@
 """Offline Markdown-to-HTML rendering, independent of the Qt user interface.
 
-Only details/summary markup is enabled; other document HTML is escaped and
-document scripts are never executed. Remote subresources are blocked by the
-generated Content Security Policy; local and data-URI images work. Navigation
-is handled separately by the reader widget.
+HTML comments are hidden and only details/summary markup is enabled; other
+document HTML is escaped and document scripts are never executed. Remote
+subresources are blocked by the generated Content Security Policy; local and
+data-URI images work. Navigation is handled separately by the reader widget.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
+from .comments import comments_plugin
 from .disclosures import disclosures_plugin
 
 
@@ -98,7 +99,7 @@ def render_markdown(source: str, *, path: Path) -> RenderedDocument:
     path = Path(path).expanduser().absolute()
     parser = MarkdownIt("commonmark", {"html": False, "highlight": _highlight_code})
     parser.enable(["table", "strikethrough"])
-    parser.use(tasklists_plugin).use(footnote_plugin).use(disclosures_plugin)
+    parser.use(tasklists_plugin).use(footnote_plugin).use(disclosures_plugin).use(comments_plugin)
     environment: dict = {}
     tokens = parser.parse(source.removeprefix("\ufeff"), environment)
 

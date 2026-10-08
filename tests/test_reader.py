@@ -364,6 +364,33 @@ class ReaderTests(unittest.TestCase):
             " - document.documentElement.clientWidth"
         )) < 2)
 
+    def test_comments_are_hidden_in_webengine_and_excluded_from_outline(self):
+        self.replace(
+            '# 文件 <!-- 標題備註 -->\n\n'
+            '前文 <!-- 行內備註 --> 後文\n\n'
+            '<!--\n## 隱藏章節\n隱藏文字\n-->\n'
+            '## 顯示章節\n\n'
+            '```\n<!-- 程式碼範例 -->\n```\n\n'
+            '`<!-- 行內程式碼範例 -->`\n'
+            '<details open>\n<summary>摘要 <!--\n<details>隱藏折疊</details>\n'
+            '--> 尾摘要</summary>\n折疊內容\n</details>\n'
+        )
+        text = self.javascript("document.querySelector('main').innerText")
+        self.assertIn('前文 後文', text)
+        self.assertIn('<!-- 程式碼範例 -->', text)
+        self.assertIn('<!-- 行內程式碼範例 -->', text)
+        for hidden in ('標題備註', '行內備註', '隱藏章節', '隱藏文字', '隱藏折疊'):
+            self.assertNotIn(hidden, text)
+        self.assertEqual(self.javascript("document.querySelectorAll('details').length"), 1)
+        self.assertEqual(self.javascript("document.querySelector('summary').innerText"), '摘要 尾摘要')
+        self.assertEqual(self.tab.document.title, '文件')
+        self.assertEqual(self.tab.outline.topLevelItemCount(), 1)
+        root = self.tab.outline.topLevelItem(0)
+        self.assertEqual(root.text(0), '文件')
+        self.assertEqual(root.childCount(), 1)
+        self.assertEqual(root.child(0).text(0), '顯示章節')
+        self.assertEqual(self.javascript("document.querySelectorAll('h1, h2').length"), 2)
+
     def test_fit_width_tracks_window_outline_and_splitter(self):
         self.tab.resize(1600, 700)
         QTest.mouseClick(self.tab.fit_width_button, Qt.MouseButton.LeftButton)

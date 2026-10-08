@@ -4,6 +4,7 @@ Raw HTML stays disabled. Only details/summary tags are emitted, and only the
 boolean ``open`` attribute is retained; all text still passes through Markdown.
 """
 
+from bisect import bisect_left
 from html.parser import HTMLParser
 import re
 
@@ -14,7 +15,6 @@ from markdown_it.rules_inline import StateInline
 
 
 _TAG_START = re.compile(r"</?(details|summary)(?=[\s/>])", re.IGNORECASE)
-_SUMMARY_END = re.compile(r"</summary\s*>\s*$", re.IGNORECASE)
 
 
 class _DisclosureTag(HTMLParser):
@@ -54,6 +54,31 @@ def _disclosure_inline(state: StateInline, silent: bool) -> bool:
     return True
 
 
+def _summary_end_line(state: StateBlock, start: int, end: int) -> int:
+    """Find a closing summary outside comments, code spans, and escapes."""
+    inline = StateInline(state.src, state.md, state.env, [])
+    inline.pos = state.bMarks[start] + state.tShift[start]
+    inline.posMax = state.eMarks[end - 1]
+    while inline.pos < inline.posMax:
+        line = bisect_left(state.eMarks, inline.pos, start, end)
+        if line > start and (state.isEmpty(line) or state.sCount[line] < state.blkIndent):
+            break
+        position = state.bMarks[line] + state.tShift[line]
+        # Quote/list prefixes have been removed from the block line marks.
+        inline.pos = max(inline.pos, position)
+        match = _tag_at(state.src, inline.pos)
+        if match is not None:
+            suffix = state.src[inline.pos + match.end():state.eMarks[line]]
+            if _DisclosureTag(match.group()).html == "</summary>" and not suffix.strip():
+                return line + 1
+            if line > start and inline.pos == position:
+                break
+        # The inline rules skip entire comments/code spans, including any
+        # blank lines or disclosure tags inside them, without producing tokens.
+        state.md.inline.skipToken(inline)
+    return start + 1
+
+
 def _disclosure_block(state: StateBlock, start: int, end: int, silent: bool) -> bool:
     if state.is_code_block(start):
         return False
@@ -68,16 +93,8 @@ def _disclosure_block(state: StateBlock, start: int, end: int, silent: bool) -> 
     next_line = start + 1
     # A summary may span several lines. Keep its phrasing content out of a
     # paragraph wrapper so it remains a direct child of the details element.
-    if _DisclosureTag(match.group()).html == "<summary>" and not _SUMMARY_END.search(line):
-        for candidate in range(next_line, end):
-            if state.isEmpty(candidate) or state.sCount[candidate] < state.blkIndent:
-                break
-            text = state.src[state.bMarks[candidate] + state.tShift[candidate]:state.eMarks[candidate]]
-            if _SUMMARY_END.search(text):
-                next_line = candidate + 1
-                break
-            if _TAG_START.match(text):
-                break
+    if _DisclosureTag(match.group()).html == "<summary>":
+        next_line = _summary_end_line(state, start, end)
 
     # Inline tokenization respects code spans and escapes, and resolves links
     # after the whole document has been parsed. Omitting paragraph tokens lets

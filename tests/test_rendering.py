@@ -175,6 +175,135 @@ class RenderingTests(unittest.TestCase):
         self.assertFalse(parsed.attributes("summary"))
         self.assertEqual(len(parsed.attributes("pre")), 2)
 
+    def test_comments_hide_single_line_inline_and_multiline_markdown(self):
+        document = self.render(
+            '# 文件 <!-- 標題備註 -->\n\n'
+            '前文 <!-- 行內 **隱藏文字** --> 後文\n\n'
+            '<!-- 單行隱藏文字 -->\n'
+            '<!--\n\n# 隱藏的一級標題\n## 重複\n'
+            '**多行隱藏文字**\n\n'
+            '<details open><summary>隱藏摘要</summary>隱藏折疊</details>\n'
+            '<script>alert(1)</script>\n![隱藏圖片](hidden.png)\n'
+            '```\n隱藏程式碼\n```\n-->\n'
+            '## 重複\n\n前文 <!-- 跨行隱藏\n另一行隱藏 --> 後文\n'
+        )
+        self.assertEqual(document.title, '文件')
+        self.assertEqual([(heading.title, heading.anchor) for heading in document.headings],
+                         [('文件', '文件'), ('重複', '重複')])
+        self.assertIn('<p>前文  後文</p>', document.html)
+        for hidden in ('備註', '隱藏', 'hidden.png', 'alert(1)', '&lt;!--', '--&gt;'):
+            self.assertNotIn(hidden, document.html)
+        parsed = HTMLDocument(document.html)
+        for tag in ('details', 'summary', 'script', 'img', 'pre', 'strong'):
+            self.assertFalse(parsed.attributes(tag))
+
+    def test_comment_contents_do_not_define_links_or_footnotes(self):
+        document = self.render(
+            '<!--\n[link]: https://hidden.invalid\n[^note]: 隱藏註腳\n-->\n'
+            '[link] and missing[^note]\n\n'
+            '<!-- [safe]: https://hidden.invalid -->\n'
+            '[safe]\n\n[safe]: https://example.com\n'
+        )
+        parsed = HTMLDocument(document.html)
+        self.assertEqual([link['href'] for link in parsed.attributes('a')], ['https://example.com'])
+        self.assertIn('[link] and missing[^note]', document.html)
+        self.assertNotIn('隱藏註腳', document.html)
+        self.assertNotIn('hidden.invalid', document.html)
+        self.assertNotIn('footnote-ref', document.html.split('<main class="markdown-body">', 1)[1])
+
+    def test_comments_in_quotes_lists_tables_and_disclosures(self):
+        document = self.render(
+            '> <!--\n> ## 引用隱藏標題\n> 隱藏引用\n> -->\n> 引用內容\n\n'
+            '- <!--\n  ## 清單隱藏標題\n  隱藏清單\n  -->\n  清單內容\n\n'
+            '| 名稱 | 值 |\n|---|---|\n| A <!-- 隱藏表格 --> | 1 |\n\n'
+            '<details>\n<summary>摘要 <!-- 隱藏摘要 --> **文字**</summary>\n'
+            '<!--\n## 折疊隱藏標題\n隱藏折疊\n-->\n## 折疊章節\n</details>\n'
+        )
+        self.assertNotIn('隱藏', document.html)
+        self.assertEqual([heading.title for heading in document.headings], ['折疊章節'])
+        parsed = HTMLDocument(document.html)
+        for tag in ('blockquote', 'ul', 'table', 'details', 'summary', 'strong'):
+            self.assertEqual(len(parsed.attributes(tag)), 1)
+        self.assertIn('<summary>摘要  <strong>文字</strong></summary>', document.html)
+        self.assertIn('引用內容', document.html)
+        self.assertIn('清單內容', document.html)
+
+    def test_comment_block_preserves_suffixes_and_interrupts_paragraphs(self):
+        document = self.render(
+            '前文\n<!-- 隱藏第一段 -->**後文** <!-- 隱藏第二段 -->\n'
+            '<!--\n隱藏多行\n-->[連結][link]\n'
+            '<!-- 隱藏備註 --><details><summary>摘要</summary>內容</details>\n'
+            '<!-- 隱藏備註 --><script>alert(1)</script>\n'
+            '## 最後章節\n\n[link]: https://example.com\n'
+        )
+        self.assertNotIn('隱藏', document.html)
+        self.assertIn('<p>前文</p>', document.html)
+        self.assertIn('<strong>後文</strong>', document.html)
+        self.assertIn('<details><summary>摘要</summary>內容</details>', document.html)
+        self.assertIn('&lt;script&gt;alert(1)&lt;/script&gt;', document.html)
+        self.assertEqual([heading.title for heading in document.headings], ['最後章節'])
+        parsed = HTMLDocument(document.html)
+        self.assertEqual([link['href'] for link in parsed.attributes('a')], ['https://example.com'])
+        self.assertFalse(parsed.attributes('script'))
+
+    def test_multiline_summary_comments_do_not_end_summary_or_emit_hidden_tags(self):
+        source = (
+            '<details>\n<summary>摘要 <!--\n</summary>\n'
+            '<details>隱藏折疊</details>\n\n## 隱藏標題\n'
+            '--> **尾摘要**\n</summary>\n## 內容\n</details>\n'
+        )
+        for prefix in ('', '> '):
+            with self.subTest(prefix=prefix):
+                document = self.render(''.join(prefix + line for line in source.splitlines(keepends=True)))
+                self.assertNotIn('隱藏', document.html)
+                self.assertNotIn('&lt;!--', document.html)
+                self.assertEqual([heading.title for heading in document.headings], ['內容'])
+                parsed = HTMLDocument(document.html)
+                self.assertEqual(parsed.attributes('details'), [{}])
+                self.assertEqual(parsed.attributes('summary'), [{}])
+                self.assertIn('<summary>摘要  <strong>尾摘要</strong>\n</summary>', document.html)
+
+    def test_comment_examples_in_code_escapes_and_entities_stay_literal(self):
+        document = self.render(
+            '```\n<!-- 圍欄範例\n## 程式碼標題\n-->\n```\n\n'
+            '    <!-- 縮排範例 -->\n\n'
+            '`<!-- 行內範例 -->`\n\n'
+            r'\<!-- 跳脫範例 -->' + '\n\n'
+            '&lt;!-- 實體範例 --&gt;\n'
+        )
+        self.assertFalse(document.headings)
+        self.assertEqual(len(HTMLDocument(document.html).attributes('pre')), 2)
+        for example in ('圍欄範例', '縮排範例', '行內範例', '跳脫範例', '實體範例'):
+            self.assertIn('&lt;!-- ' + example, document.html)
+        self.assertIn('## 程式碼標題', document.html)
+
+    def test_unclosed_comments_respect_block_boundaries_and_inline_literals(self):
+        document = self.render(
+            '# 文件\n\n> <!--\n> ## 引用隱藏\n\n'
+            '## 引用之外\n\n'
+            '- <!--\n  ## 清單隱藏\n\n'
+            '## 清單之外\n\n前文 <!-- 未閉合行內\n\n'
+            '<!-- 未閉合區塊\n\n## 文件尾隱藏\n'
+        )
+        self.assertEqual([heading.title for heading in document.headings],
+                         ['文件', '引用之外', '清單之外'])
+        self.assertNotIn('隱藏', document.html)
+        self.assertNotIn('未閉合區塊', document.html)
+        self.assertIn('前文 &lt;!-- 未閉合行內', document.html)
+
+    def test_empty_and_adjacent_comments_preserve_surrounding_text(self):
+        document = self.render(
+            '# A<!---->B <!-- 備註 --> C\n\n'
+            'A<!----><!-- 備註 -->B<!-->C<!--->D\n\n'
+            '<!----><!---->尾文\n'
+        )
+        self.assertEqual(document.title, 'AB  C')
+        self.assertEqual(document.headings[0].anchor, 'ab-c')
+        self.assertIn('<p>ABCD</p>', document.html)
+        self.assertIn('尾文', document.html)
+        self.assertNotIn('備註', document.html)
+        self.assertNotIn('&lt;!--', document.html)
+
     def test_raw_html_and_unsafe_links_do_not_become_active_elements(self):
         document = self.render(
             '<script>alert(1)</script>\n\n<img src="x" onerror="alert(1)">\n\n'
