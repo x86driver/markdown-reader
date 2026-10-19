@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Callable
 
 from PySide6.QtCore import (
     QAbstractListModel, QCoreApplication, QEvent, QModelIndex, QRect, QSettings, QSize,
-    Qt, QTimer, QUrl, Signal, Slot,
+    Qt, QTimer, QUrl, Signal, Slot, qVersion,
 )
 from PySide6.QtGui import (
     QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPalette, QShortcut,
@@ -850,7 +851,22 @@ class FinderWindow(QMainWindow):
             self.close()
 
 
+def _configure_wayland_egl_resize(app: QApplication):
+    # Qt 6.11.2 can keep the old client FBO when decoration margins change
+    # without changing the total EGL surface size (e.g. maximizing a large
+    # window). Its built-in resize override also refreshes the client FBO.
+    # In this release the override runs on geometry/scale changes, not every
+    # repaint. Keep the version gate: newer Qt render paths can differ.
+    # https://github.com/qt/qtbase/blob/v6.11.2/src/plugins/platforms/wayland/plugins/hardwareintegration/wayland-egl/qwaylandeglwindow.cpp
+    if (sys.platform.startswith("linux")
+            and app.platformName() in {"wayland", "wayland-egl"}
+            and qVersion() == "6.11.2"):
+        os.environ.setdefault("QT_WAYLAND_DISABLE_RESIZECHECK", "1")
+
+
 def configure_application(app: QApplication):
+    # Must precede the first native window: Qt caches this flag on first use.
+    _configure_wayland_egl_resize(app)
     app.setApplicationName("MarkdownFinder")
     app.setApplicationVersion(__version__)
     app.setOrganizationName("MarkdownFinder")

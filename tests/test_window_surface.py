@@ -11,7 +11,8 @@ import time
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QCoreApplication, QEvent, QSettings, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QSettings, QSize, Qt, qVersion
+from PySide6.QtGui import QOpenGLContext
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -35,6 +36,45 @@ def javascript(tab, source):
     tab.page.runJavaScript(source, values.append)
     wait_until(lambda: bool(values))
     return values[0]
+
+
+def content_framebuffer(window):
+    """Measure Qt's actual EGL content texture, rather than QWidget.grab()."""
+    import ctypes
+
+    window.repaint()
+    context = QOpenGLContext.currentContext()
+    if context is None or context.surface() != window.windowHandle():
+        raise AssertionError("Reader repaint did not leave its OpenGL context current")
+    egl = ctypes.CDLL("libEGL.so.1")
+    egl.eglGetProcAddress.argtypes = [ctypes.c_char_p]
+    egl.eglGetProcAddress.restype = ctypes.c_void_p
+
+    def function(name, *arguments):
+        address = egl.eglGetProcAddress(name.encode())
+        if not address:
+            raise AssertionError(f"Missing OpenGL function: {name}")
+        return ctypes.CFUNCTYPE(None, *arguments)(address)
+
+    uint, integer = ctypes.c_uint, ctypes.c_int
+    pointer = ctypes.POINTER(integer)
+    get = function("glGetIntegerv", uint, pointer)
+    attachment = function("glGetFramebufferAttachmentParameteriv", uint, uint, uint, pointer)
+    bind = function("glBindTexture", uint, uint)
+    parameter = function("glGetTexLevelParameteriv", uint, integer, uint, pointer)
+    framebuffer, texture, previous, width, height = (integer() for _ in range(5))
+    get(0x8CA6, ctypes.byref(framebuffer))  # GL_DRAW_FRAMEBUFFER_BINDING
+    if not framebuffer.value:
+        raise AssertionError("Expected a decorated Wayland content framebuffer")
+    attachment(0x8D40, 0x8CE0, 0x8CD1, ctypes.byref(texture))
+    get(0x8069, ctypes.byref(previous))  # GL_TEXTURE_BINDING_2D
+    bind(0x0DE1, texture.value)
+    try:
+        parameter(0x0DE1, 0, 0x1000, ctypes.byref(width))
+        parameter(0x0DE1, 0, 0x1001, ctypes.byref(height))
+    finally:
+        bind(0x0DE1, previous.value)
+    return texture.value, QSize(width.value, height.value)
 
 
 class ObservedFinderWindow(FinderWindow):
@@ -300,6 +340,57 @@ class NativeWindowSurfaceTests(unittest.TestCase):
         self.assert_stable_window()
         self.window.showNormal()
         wait_until(lambda: not self.window.isMaximized() and self.window.size() == normal_size)
+        self.assert_stable_window()
+
+    def test_equal_frame_maximize_updates_content_buffer_and_preserves_reader(self):
+        if self.app.platformName() not in {"wayland", "wayland-egl"} or qVersion() != "6.11.2":
+            self.skipTest("Regression for Qt 6.11.2 Wayland EGL decorations")
+        self.show_window()
+        reader = self.open_document(self.first)
+        reader._set_zoom(1.3)
+        self.scroll_to(reader, 900)
+        window = self.window
+        window.showMaximized()
+        QTest.qWait(1700)
+        maximized = window.size()
+        margins = window.windowHandle().frameMargins()
+        frame_size = maximized + QSize(margins.left() + margins.right(),
+                                       margins.top() + margins.bottom())
+
+        # Control this probe's normal size without work-area repairs. The real
+        # compositor still handles both states and their decoration margins.
+        window._window_geometry_guard.stop()
+        window.showNormal()
+        wait_until(lambda: not window.isMaximized())
+        QTest.qWait(500)
+        margins = window.windowHandle().frameMargins()
+        normal = frame_size - QSize(margins.left() + margins.right(),
+                                    margins.top() + margins.bottom())
+        self.assertNotEqual(normal, maximized, "Requires changing decoration margins")
+        window.resize(normal)
+        wait_until(lambda: window.size() == normal)
+        QTest.qWait(300)
+        ratio = window.devicePixelRatioF()
+        _, normal_buffer = content_framebuffer(window)
+        self.assertEqual(normal_buffer, normal * ratio)
+
+        window.showMaximized()
+        wait_until(lambda: window.isMaximized() and window.size() == maximized)
+        QTest.qWait(500)
+        margins = window.windowHandle().frameMargins()
+        self.assertEqual(window.size() + QSize(margins.left() + margins.right(),
+                                              margins.top() + margins.bottom()), frame_size)
+        texture, buffer_size = content_framebuffer(window)
+        # This fails without the workaround: the texture retains normal's
+        # smaller size even though Qt renders using the maximized viewport.
+        self.assertEqual(buffer_size, maximized * ratio)
+        for _ in range(3):
+            window.update()
+            QTest.qWait(50)
+            self.assertEqual(content_framebuffer(window), (texture, buffer_size))
+        self.assertIs(window.current_reader(), reader)
+        self.assertAlmostEqual(reader.view.zoomFactor(), 1.3)
+        self.assertAlmostEqual(javascript(reader, "window.scrollY"), 900, delta=5)
         self.assert_stable_window()
 
 
